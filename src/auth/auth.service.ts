@@ -1,19 +1,24 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomBytes } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 
 const SCOPE = 'ZohoCRM.modules.ALL';
-const STATE_TTL_MS = 10 * 60 * 1000;
+export const STATE_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING_STATES = 1000;
+
+export interface AuthorizationRequest {
+  url: string;
+  state: string;
+}
 
 @Injectable()
 export class AuthService {
-  /** CSRF protection: states we handed out and haven't seen come back yet. */
+  /** States we handed out and haven't seen come back yet (value = expiry). */
   private readonly pendingStates = new Map<string, number>();
 
   constructor(private readonly config: ConfigService) {}
 
-  buildAuthorizationUrl(): string {
+  createAuthorizationRequest(): AuthorizationRequest {
     this.dropExpiredStates();
     // Hard cap so hammering /oauth/login can't grow memory without limit.
     // Map keeps insertion order, so the first key is the oldest.
@@ -35,15 +40,34 @@ export class AuthService {
       state,
     });
     const accountsUrl = this.config.getOrThrow<string>('ZOHO_ACCOUNTS_URL');
-    return `${accountsUrl}/oauth/v2/auth?${params.toString()}`;
+    return { url: `${accountsUrl}/oauth/v2/auth?${params.toString()}`, state };
   }
 
-  /** Single-use check of the state value Zoho echoes back. */
-  consumeState(state: string | undefined): boolean {
+  /**
+   * The state Zoho echoes back must (a) be one we issued, (b) not be used
+   * yet, and (c) match the cookie set on the browser that started the flow.
+   * (c) stops login CSRF: without it, an attacker could finish consent with
+   * their own Zoho account and trick someone else's browser into hitting
+   * the callback, connecting this server to the attacker's CRM.
+   */
+  consumeState(
+    queryState: string | undefined,
+    cookieState: string | undefined,
+  ): boolean {
     this.dropExpiredStates();
-    if (!state || !this.pendingStates.has(state)) return false;
-    this.pendingStates.delete(state);
+    if (typeof queryState !== 'string' || typeof cookieState !== 'string') {
+      return false;
+    }
+    if (!this.safeEqual(queryState, cookieState)) return false;
+    if (!this.pendingStates.has(queryState)) return false;
+    this.pendingStates.delete(queryState);
     return true;
+  }
+
+  private safeEqual(a: string, b: string): boolean {
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
   }
 
   private dropExpiredStates(): void {
