@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 
 const SCOPE = 'ZohoCRM.modules.ALL';
 const STATE_TTL_MS = 10 * 60 * 1000;
+const MAX_PENDING_STATES = 1000;
 
 @Injectable()
 export class AuthService {
@@ -13,6 +14,14 @@ export class AuthService {
   constructor(private readonly config: ConfigService) {}
 
   buildAuthorizationUrl(): string {
+    this.dropExpiredStates();
+    // Hard cap so hammering /oauth/login can't grow memory without limit.
+    // Map keeps insertion order, so the first key is the oldest.
+    while (this.pendingStates.size >= MAX_PENDING_STATES) {
+      const oldest = this.pendingStates.keys().next().value as string;
+      this.pendingStates.delete(oldest);
+    }
+
     const state = randomBytes(16).toString('hex');
     this.pendingStates.set(state, Date.now() + STATE_TTL_MS);
 
