@@ -140,25 +140,45 @@ export class TokenService {
 
     // Zoho reports OAuth errors as HTTP 200 with { error: "..." }.
     if (data.error || !data.access_token) {
-      const code = (data.error ?? 'UNKNOWN').toUpperCase();
-      const unauthorized = [
-        'INVALID_CODE',
-        'INVALID_CLIENT',
-        'INVALID_CLIENT_SECRET',
-      ];
-      throw new ZohoApiError(
-        unauthorized.includes(code)
-          ? HttpStatus.UNAUTHORIZED
-          : HttpStatus.BAD_REQUEST,
-        code,
-        code === 'INVALID_CODE'
-          ? 'The authorization code or refresh token is invalid or expired. Visit /oauth/login again.'
-          : `Zoho rejected the token request (${code}).`,
-        endpoint,
-      );
+      // e.g. "invalid_code" -> INVALID_CODE, "Access Denied" -> ACCESS_DENIED
+      const code = (data.error ?? 'UNKNOWN')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, '_');
+      const [status, message] = this.describeTokenError(code);
+      throw new ZohoApiError(status, code, message, endpoint);
     }
 
     return data;
+  }
+
+  private describeTokenError(code: string): [HttpStatus, string] {
+    switch (code) {
+      case 'INVALID_CODE':
+        return [
+          HttpStatus.UNAUTHORIZED,
+          'The authorization code or refresh token is invalid or expired. Visit /oauth/login again.',
+        ];
+      case 'ACCESS_DENIED':
+        // Zoho allows only ~10 access tokens per 10 minutes per refresh token.
+        return [
+          HttpStatus.TOO_MANY_REQUESTS,
+          'Zoho is rate-limiting token requests. Please retry in a few minutes.',
+        ];
+      case 'INVALID_CLIENT':
+      case 'INVALID_CLIENT_SECRET':
+      case 'INVALID_REDIRECT_URI':
+        // Server misconfiguration, not the caller's fault.
+        return [
+          HttpStatus.INTERNAL_SERVER_ERROR,
+          "Zoho rejected this server's OAuth client settings. Check ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET and ZOHO_REDIRECT_URI.",
+        ];
+      default:
+        return [
+          HttpStatus.BAD_GATEWAY,
+          `Zoho rejected the token request (${code}).`,
+        ];
+    }
   }
 
   private toStoredTokens(

@@ -222,6 +222,8 @@ A global exception filter turns every Zoho failure into the same JSON shape, wit
 | Bad module | 400 | `INVALID_MODULE` | The requested Zoho CRM module does not exist or is not supported. |
 | Missing field | 400 | `MANDATORY_NOT_FOUND` | Required field "Last_Name" is missing. |
 | Bad data / record ID | 400 | `INVALID_DATA` | Invalid value for field "Email". |
+| Too many token refreshes | 429 | `ACCESS_DENIED` | Zoho is rate-limiting token requests. Please retry in a few minutes. |
+| Wrong client ID/secret/redirect URI in `.env` | 500 | `INVALID_CLIENT` | Zoho rejected this server's OAuth client settings. Check ZOHO_CLIENT_ID, ... |
 | Zoho down / 5xx | 502 | `ZOHO_UNREACHABLE` | Could not reach the Zoho CRM API. Please try again. |
 
 Each error is logged as one JSON line with the route, Zoho endpoint, Zoho error code, status and timestamp, for example:
