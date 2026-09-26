@@ -107,8 +107,16 @@ export class LeadsService {
         );
         return { created: false, lead };
       } catch (err) {
-        if (!(err instanceof NotFoundException)) throw err;
-        this.recentlyCreated.delete(dto.Email); // deleted in Zoho since
+        // A deleted record can come back as 204 (-> NotFound) or as a 4xx
+        // like INVALID_DATA. Either way it's gone, so fall through to a
+        // normal search + create. Auth and 5xx errors still propagate.
+        const gone =
+          err instanceof NotFoundException ||
+          (err instanceof ZohoApiError &&
+            (err.status === HttpStatus.BAD_REQUEST ||
+              err.status === HttpStatus.NOT_FOUND));
+        if (!gone) throw err;
+        this.recentlyCreated.delete(dto.Email);
       }
     }
 
