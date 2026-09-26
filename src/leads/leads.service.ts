@@ -17,6 +17,8 @@ import {
 
 const MODULE = '/Leads';
 const LEAD_FIELDS = 'Full_Name,First_Name,Last_Name,Email,Phone';
+/** How long we trust our own record of a create while Zoho indexes it. */
+const RECENT_CREATE_TTL_MS = 10 * 60 * 1000;
 
 export interface CreateLeadResult {
   created: boolean;
@@ -26,6 +28,13 @@ export interface CreateLeadResult {
 @Injectable()
 export class LeadsService {
   private readonly logger = new Logger(LeadsService.name);
+  /** Pending create per email, used to run same-email creates in order. */
+  private readonly createQueue = new Map<string, Promise<CreateLeadResult>>();
+  /** Leads we created recently, by email, until Zoho's search catches up. */
+  private readonly recentlyCreated = new Map<
+    string,
+    { id: string; expiresAt: number }
+  >();
 
   constructor(private readonly zoho: ZohoHttpClient) {}
 
@@ -66,8 +75,43 @@ export class LeadsService {
     return record ? this.toLead(record) : null;
   }
 
-  /** Creates the lead unless one with the same email already exists. */
+  /**
+   * Creates the lead unless one with the same email already exists.
+   * Calls for the same email run one after another, so two concurrent
+   * requests can't both pass the duplicate check.
+   */
   async create(dto: CreateLeadDto): Promise<CreateLeadResult> {
+    const key = dto.Email;
+    const previous = this.createQueue.get(key) ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() => this.createIfMissing(dto));
+
+    this.createQueue.set(key, run);
+    try {
+      return await run;
+    } finally {
+      if (this.createQueue.get(key) === run) this.createQueue.delete(key);
+    }
+  }
+
+  private async createIfMissing(dto: CreateLeadDto): Promise<CreateLeadResult> {
+    // Zoho's search index lags behind inserts, so check our own recent
+    // creates first and look them up by ID (which doesn't use the index).
+    const recent = this.findRecentlyCreated(dto.Email);
+    if (recent) {
+      try {
+        const lead = await this.findOne(recent);
+        this.logger.log(
+          `Lead with this email was just created (id ${lead.id}), skipping create`,
+        );
+        return { created: false, lead };
+      } catch (err) {
+        if (!(err instanceof NotFoundException)) throw err;
+        this.recentlyCreated.delete(dto.Email); // deleted in Zoho since
+      }
+    }
+
     const existing = await this.findByEmail(dto.Email);
     if (existing) {
       this.logger.log(
@@ -92,6 +136,8 @@ export class LeadsService {
       );
     }
 
+    this.rememberCreated(dto.Email, result.details.id);
+
     return {
       created: true,
       lead: {
@@ -101,6 +147,27 @@ export class LeadsService {
         phone: dto.Phone ?? null,
       },
     };
+  }
+
+  private findRecentlyCreated(email: string): string | null {
+    const entry = this.recentlyCreated.get(email);
+    if (!entry) return null;
+    if (entry.expiresAt < Date.now()) {
+      this.recentlyCreated.delete(email);
+      return null;
+    }
+    return entry.id;
+  }
+
+  private rememberCreated(email: string, id: string): void {
+    const now = Date.now();
+    for (const [key, entry] of this.recentlyCreated) {
+      if (entry.expiresAt < now) this.recentlyCreated.delete(key);
+    }
+    this.recentlyCreated.set(email, {
+      id,
+      expiresAt: now + RECENT_CREATE_TTL_MS,
+    });
   }
 
   private toLead(record: ZohoLeadRecord): Lead {
