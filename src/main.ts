@@ -12,6 +12,7 @@ async function bootstrap() {
       whitelist: true,
       forbidNonWhitelisted: true,
       transform: true,
+      stopAtFirstError: true,
     }),
   );
   app.useGlobalFilters(new ZohoExceptionFilter());
