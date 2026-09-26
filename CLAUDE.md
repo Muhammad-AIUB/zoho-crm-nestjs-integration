@@ -4,11 +4,14 @@ Project notes for Claude working in this repo.
 
 ## Project
 
-NestJS + TypeScript service that talks to the Zoho CRM v2 API:
-- `src/auth` — OAuth login/callback, token storage (`tokens.json`), auto-refresh
-- `src/zoho` — shared Zoho HTTP client
-- `src/leads` — Leads list / get / create (with duplicate check by email)
+Multi-tenant NestJS + TypeScript service that talks to the Zoho CRM v2 API:
+- `src/tenancy` — `@TenantId()` decorator: tenant from `X-Tenant-Id` (or `?tenant=` on /oauth/login)
+- `src/auth` — OAuth login/callback, per-tenant token files (`tokens/{tenant}.json`), auto-refresh
+- `src/zoho` — shared Zoho HTTP client (per-tenant token + data center, retries)
+- `src/leads` — Leads list / fields / get / create (duplicate check per tenant + email)
 - `src/common` — global exception filter
+
+Every service method takes `tenantId` explicitly; keep it that way so no call can use another tenant's token.
 
 ## Git rules
 
