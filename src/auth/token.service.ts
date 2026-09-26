@@ -73,18 +73,31 @@ export class TokenService {
     return this.refreshAccessToken();
   }
 
-  /** Forces a refresh. Also used when Zoho rejects a token we thought was valid. */
-  async refreshAccessToken(): Promise<string> {
+  /**
+   * Refreshes the access token. Pass `rejectedToken` when Zoho just answered
+   * 401 for it: if another request already replaced that token, we reuse the
+   * new one instead of refreshing again. Zoho only allows ~10 refreshes per
+   * 10 minutes, so a burst of 401s must not turn into a burst of refreshes.
+   */
+  async refreshAccessToken(rejectedToken?: string): Promise<string> {
     if (!this.refreshInFlight) {
-      this.refreshInFlight = this.doRefresh().finally(() => {
+      this.refreshInFlight = this.doRefresh(rejectedToken).finally(() => {
         this.refreshInFlight = null;
       });
     }
     return this.refreshInFlight;
   }
 
-  private async doRefresh(): Promise<string> {
+  private async doRefresh(rejectedToken?: string): Promise<string> {
     const current = await this.store.read();
+    if (
+      rejectedToken &&
+      current &&
+      current.access_token !== rejectedToken &&
+      Date.now() < current.expires_at - EXPIRY_BUFFER_MS
+    ) {
+      return current.access_token;
+    }
     if (!current?.refresh_token) {
       throw new ZohoApiError(
         HttpStatus.UNAUTHORIZED,

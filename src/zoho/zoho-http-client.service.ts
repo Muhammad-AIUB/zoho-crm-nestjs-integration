@@ -58,9 +58,7 @@ export class ZohoHttpClient {
     isRetry = false,
   ): Promise<T | null> {
     const endpoint = `${method} /crm/v2${path}`;
-    const token = isRetry
-      ? await this.tokenService.refreshAccessToken()
-      : await this.tokenService.getAccessToken();
+    const token = await this.tokenService.getAccessToken();
 
     try {
       const res = await this.http.request<T>({
@@ -84,8 +82,16 @@ export class ZohoHttpClient {
       const { status } = err.response;
       const error = this.extractError(err.response.data);
 
-      // Token may have been revoked or expired early — refresh once and retry.
-      if (status === HttpStatus.UNAUTHORIZED && !isRetry) {
+      // Token may have been revoked or expired early: refresh once and retry.
+      // A 401 means Zoho rejected the request before running it, so retrying
+      // a POST can't create a duplicate. A scope mismatch won't be fixed by a
+      // new token, so don't spend a refresh on it.
+      if (
+        status === HttpStatus.UNAUTHORIZED &&
+        !isRetry &&
+        error.code !== 'OAUTH_SCOPE_MISMATCH'
+      ) {
+        await this.tokenService.refreshAccessToken(token);
         return this.request<T>(method, path, options, true);
       }
 
