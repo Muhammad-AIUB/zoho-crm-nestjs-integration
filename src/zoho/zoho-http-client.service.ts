@@ -4,10 +4,15 @@ import axios, { AxiosInstance, Method } from 'axios';
 import { TokenService } from '../auth/token.service';
 import { ZohoApiError } from './zoho-api.error';
 
-interface ZohoErrorBody {
+interface ZohoErrorDetail {
   code?: string;
   message?: string;
   details?: Record<string, unknown>;
+}
+
+/** Top-level errors use code/message; record-level ones nest them in data[0]. */
+interface ZohoErrorBody extends ZohoErrorDetail {
+  data?: ZohoErrorDetail[];
 }
 
 export interface ZohoRequestOptions {
@@ -77,7 +82,7 @@ export class ZohoHttpClient {
       }
 
       const { status } = err.response;
-      const body = (err.response.data ?? {}) as ZohoErrorBody;
+      const error = this.extractError(err.response.data);
 
       // Token may have been revoked or expired early — refresh once and retry.
       if (status === HttpStatus.UNAUTHORIZED && !isRetry) {
@@ -86,11 +91,19 @@ export class ZohoHttpClient {
 
       throw new ZohoApiError(
         status >= 500 ? HttpStatus.BAD_GATEWAY : status,
-        body.code ?? `HTTP_${status}`,
-        body.message ?? 'Zoho CRM request failed.',
+        error.code ?? `HTTP_${status}`,
+        error.message ?? 'Zoho CRM request failed.',
         endpoint,
-        body.details,
+        error.details,
       );
     }
+  }
+
+  private extractError(raw: unknown): ZohoErrorDetail {
+    if (!raw || typeof raw !== 'object') return {};
+    const body = raw as ZohoErrorBody;
+    if (body.code) return body;
+    const record = Array.isArray(body.data) ? body.data[0] : undefined;
+    return record?.code ? record : {};
   }
 }
