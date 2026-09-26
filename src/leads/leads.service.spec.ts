@@ -110,3 +110,43 @@ describe('LeadsService.create', () => {
     });
   });
 });
+
+describe('LeadsService.findAll', () => {
+  const lead = { id: '1', Full_Name: 'A B', Email: 'a@b.co', Phone: null };
+
+  it('passes page/per_page to Zoho and points to the next page', async () => {
+    const get = jest.fn(async () => ({
+      data: [lead],
+      info: { page: 2, per_page: 1, count: 1, more_records: true },
+    }));
+    const service = new LeadsService({ get } as unknown as ZohoHttpClient);
+
+    const res = await service.findAll({ page: 2, per_page: 1 });
+
+    expect(get).toHaveBeenCalledWith(
+      '/Leads',
+      expect.objectContaining({ page: 2, per_page: 1 }),
+    );
+    expect(res.pagination).toEqual({
+      page: 2,
+      perPage: 1,
+      count: 1,
+      moreRecords: true,
+      nextPage: 3,
+    });
+  });
+
+  it('returns an empty last page when Zoho answers 204', async () => {
+    const get = jest.fn(async () => null);
+    const service = new LeadsService({ get } as unknown as ZohoHttpClient);
+
+    const res = await service.findAll({ page: 9, per_page: 20 });
+
+    expect(res.data).toEqual([]);
+    expect(res.pagination).toMatchObject({
+      page: 9,
+      moreRecords: false,
+      nextPage: null,
+    });
+  });
+});

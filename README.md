@@ -147,11 +147,17 @@ curl "http://localhost:3000/leads?page=1&per_page=2"
       "phone": null
     }
   ],
-  "page": 1,
-  "perPage": 2,
-  "moreRecords": true
+  "pagination": {
+    "page": 1,
+    "perPage": 2,
+    "count": 2,
+    "moreRecords": true,
+    "nextPage": 2
+  }
 }
 ```
+
+The paging values come straight from Zoho's `info` block (`page`, `per_page`, `count`, `more_records`). To walk every lead, keep requesting `nextPage` until it is `null`. Each page is one Zoho API call, so large syncs should use a bigger `per_page` (max 200).
 
 ### `GET /leads/:id`
 
@@ -319,4 +325,4 @@ npm run test:cov  # with coverage
 - **No authentication on `/leads`**: the assessment didn't ask for it. Anyone who can reach the server can read and create leads. Before real use, put it behind an API key or JWT guard, or a private network.
 - **Single instance**: `tokens.json`, the OAuth `state` store, and the dedup queue all live in one process. For several instances, swap `TokenStoreService` for a DB or secret store and move state and locks to Redis. No other code needs to change.
 - **One Zoho data center**: `ZOHO_ACCOUNTS_URL` and `ZOHO_API_DOMAIN` are fixed by config. A multi-tenant app would read the `accounts-server` callback parameter and the `api_domain` from the token response instead.
-- **Pagination**: `GET /leads` returns one page (`page`, `per_page` up to 200) plus `moreRecords`; the caller asks for the next page.
+- **Pagination**: `GET /leads` returns one page at a time (`per_page` up to 200) with `moreRecords` and `nextPage`, and the caller walks the pages. Fetching everything in one request would spend one Zoho API call per 200 records, and a very slow request.

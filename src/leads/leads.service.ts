@@ -45,11 +45,18 @@ export class LeadsService {
       per_page: query.per_page,
     });
 
+    // Zoho answers 204 (null here) for a page past the end.
+    const page = res?.info?.page ?? query.page ?? 1;
+    const moreRecords = res?.info?.more_records ?? false;
     return {
       data: (res?.data ?? []).map((r) => this.toLead(r)),
-      page: res?.info?.page ?? query.page,
-      perPage: res?.info?.per_page ?? query.per_page,
-      moreRecords: res?.info?.more_records ?? false,
+      pagination: {
+        page,
+        perPage: res?.info?.per_page ?? query.per_page,
+        count: res?.info?.count ?? 0,
+        moreRecords,
+        nextPage: moreRecords ? page + 1 : null,
+      },
     };
   }
 

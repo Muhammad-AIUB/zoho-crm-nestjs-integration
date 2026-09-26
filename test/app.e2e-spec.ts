@@ -209,10 +209,12 @@ describe('App (with a fake Zoho)', () => {
       email: 'john@acme.com',
       phone: null,
     });
-    expect(res.body).toMatchObject({
+    expect(res.body.pagination).toEqual({
       page: 1,
       perPage: 20,
+      count: 1,
       moreRecords: false,
+      nextPage: null,
     });
   });
 
