@@ -24,8 +24,13 @@ export class TokenStoreService {
       const raw = await fs.readFile(this.filePath, 'utf8');
       return JSON.parse(raw) as StoredTokens;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      this.logger.error(`Could not read token file: ${(err as Error).message}`);
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return null;
+      // Don't log err.message: JSON.parse errors quote part of the file,
+      // which here would be part of a token.
+      this.logger.error(
+        `Token file is unreadable or not valid JSON (${code ?? (err as Error).name}). Run /oauth/login again.`,
+      );
       return null;
     }
   }
