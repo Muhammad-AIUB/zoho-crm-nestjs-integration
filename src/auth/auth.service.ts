@@ -13,14 +13,20 @@ export interface AuthorizationRequest {
   state: string;
 }
 
+interface PendingState {
+  /** Zoho's callback only carries code + state, so the tenant rides on the state. */
+  tenantId: string;
+  expiresAt: number;
+}
+
 @Injectable()
 export class AuthService {
-  /** States we handed out and haven't seen come back yet (value = expiry). */
-  private readonly pendingStates = new Map<string, number>();
+  /** States we handed out and haven't seen come back yet. */
+  private readonly pendingStates = new Map<string, PendingState>();
 
   constructor(private readonly config: ConfigService) {}
 
-  createAuthorizationRequest(): AuthorizationRequest {
+  createAuthorizationRequest(tenantId: string): AuthorizationRequest {
     this.dropExpiredStates();
     // Hard cap so hammering /oauth/login can't grow memory without limit.
     // Map keeps insertion order, so the first key is the oldest.
@@ -30,7 +36,10 @@ export class AuthService {
     }
 
     const state = randomBytes(16).toString('hex');
-    this.pendingStates.set(state, Date.now() + STATE_TTL_MS);
+    this.pendingStates.set(state, {
+      tenantId,
+      expiresAt: Date.now() + STATE_TTL_MS,
+    });
 
     const params = new URLSearchParams({
       scope: SCOPE,
@@ -51,19 +60,22 @@ export class AuthService {
    * (c) stops login CSRF: without it, an attacker could finish consent with
    * their own Zoho account and trick someone else's browser into hitting
    * the callback, connecting this server to the attacker's CRM.
+   *
+   * Returns the tenant that started the flow, or null if the state is bad.
    */
   consumeState(
     queryState: string | undefined,
     cookieState: string | undefined,
-  ): boolean {
+  ): string | null {
     this.dropExpiredStates();
     if (typeof queryState !== 'string' || typeof cookieState !== 'string') {
-      return false;
+      return null;
     }
-    if (!this.safeEqual(queryState, cookieState)) return false;
-    if (!this.pendingStates.has(queryState)) return false;
+    if (!this.safeEqual(queryState, cookieState)) return null;
+    const pending = this.pendingStates.get(queryState);
+    if (!pending) return null;
     this.pendingStates.delete(queryState);
-    return true;
+    return pending.tenantId;
   }
 
   private safeEqual(a: string, b: string): boolean {
@@ -74,7 +86,7 @@ export class AuthService {
 
   private dropExpiredStates(): void {
     const now = Date.now();
-    for (const [state, expiresAt] of this.pendingStates) {
+    for (const [state, { expiresAt }] of this.pendingStates) {
       if (expiresAt < now) this.pendingStates.delete(state);
     }
   }

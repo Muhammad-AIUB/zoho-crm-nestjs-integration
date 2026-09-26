@@ -27,12 +27,16 @@ export interface CreateLeadResult {
   lead: Lead;
 }
 
+/**
+ * Every method takes the tenant explicitly and passes it down to the Zoho
+ * client, so a call can only ever use that tenant's token and CRM account.
+ */
 @Injectable()
 export class LeadsService {
   private readonly logger = new Logger(LeadsService.name);
-  /** Pending create per email, used to run same-email creates in order. */
+  /** Pending create per tenant+email, used to run same-email creates in order. */
   private readonly createQueue = new Map<string, Promise<CreateLeadResult>>();
-  /** Leads we created recently, by email, until Zoho's search catches up. */
+  /** Leads we created recently, by tenant+email, until Zoho's search catches up. */
   private readonly recentlyCreated = new Map<
     string,
     { id: string; expiresAt: number }
@@ -40,12 +44,12 @@ export class LeadsService {
 
   constructor(private readonly zoho: ZohoHttpClient) {}
 
-  async findAll(query: ListLeadsQueryDto) {
-    const res = await this.zoho.get<ZohoListResponse<ZohoLeadRecord>>(MODULE, {
-      fields: LEAD_FIELDS,
-      page: query.page,
-      per_page: query.per_page,
-    });
+  async findAll(tenantId: string, query: ListLeadsQueryDto) {
+    const res = await this.zoho.get<ZohoListResponse<ZohoLeadRecord>>(
+      tenantId,
+      MODULE,
+      { fields: LEAD_FIELDS, page: query.page, per_page: query.per_page },
+    );
 
     // Zoho answers 204 (null here) for a page past the end.
     const page = res?.info?.page ?? query.page ?? 1;
@@ -66,10 +70,14 @@ export class LeadsService {
    * The CRM UI shows field *labels* ("Customer Type") but the API only
    * accepts *API names* ("Customer_Type"). Labels can be renamed by admins
    * at any time; API names can't, so integrations must use API names.
-   * This asks Zoho for the real mapping instead of guessing it.
+   * This asks Zoho for the real mapping instead of guessing it. Custom
+   * fields differ per org, so the answer is per tenant too.
    */
-  async getFields(): Promise<{ module: string; fields: LeadField[] }> {
+  async getFields(
+    tenantId: string,
+  ): Promise<{ module: string; fields: LeadField[] }> {
     const res = await this.zoho.get<{ fields: ZohoFieldMeta[] }>(
+      tenantId,
       '/settings/fields',
       { module: 'Leads' },
     );
@@ -87,8 +95,9 @@ export class LeadsService {
     };
   }
 
-  async findOne(id: string): Promise<Lead> {
+  async findOne(tenantId: string, id: string): Promise<Lead> {
     const res = await this.zoho.get<ZohoListResponse<ZohoLeadRecord>>(
+      tenantId,
       `${MODULE}/${id}`,
     );
     const record = res?.data?.[0];
@@ -100,8 +109,9 @@ export class LeadsService {
     return this.toLead(record);
   }
 
-  async findByEmail(email: string): Promise<Lead | null> {
+  async findByEmail(tenantId: string, email: string): Promise<Lead | null> {
     const res = await this.zoho.get<ZohoListResponse<ZohoLeadRecord>>(
+      tenantId,
       `${MODULE}/search`,
       { email },
     );
@@ -110,16 +120,20 @@ export class LeadsService {
   }
 
   /**
-   * Creates the lead unless one with the same email already exists.
-   * Calls for the same email run one after another, so two concurrent
-   * requests can't both pass the duplicate check.
+   * Creates the lead unless one with the same email already exists in this
+   * tenant's CRM. Calls for the same tenant+email run one after another, so
+   * two concurrent requests can't both pass the duplicate check.
    */
-  async create(dto: CreateLeadDto): Promise<CreateLeadResult> {
-    const key = dto.Email;
+  async create(
+    tenantId: string,
+    dto: CreateLeadDto,
+  ): Promise<CreateLeadResult> {
+    // Tenant ids can't contain ":", so this key is unambiguous.
+    const key = `${tenantId}:${dto.Email}`;
     const previous = this.createQueue.get(key) ?? Promise.resolve();
     const run = previous
       .catch(() => undefined)
-      .then(() => this.createIfMissing(dto));
+      .then(() => this.createIfMissing(tenantId, key, dto));
 
     this.createQueue.set(key, run);
     try {
@@ -129,15 +143,19 @@ export class LeadsService {
     }
   }
 
-  private async createIfMissing(dto: CreateLeadDto): Promise<CreateLeadResult> {
+  private async createIfMissing(
+    tenantId: string,
+    key: string,
+    dto: CreateLeadDto,
+  ): Promise<CreateLeadResult> {
     // Zoho's search index lags behind inserts, so check our own recent
     // creates first and look them up by ID (which doesn't use the index).
-    const recent = this.findRecentlyCreated(dto.Email);
+    const recent = this.findRecentlyCreated(key);
     if (recent) {
       try {
-        const lead = await this.findOne(recent);
+        const lead = await this.findOne(tenantId, recent);
         this.logger.log(
-          `Lead with this email was just created (id ${lead.id}), skipping create`,
+          `[${tenantId}] Lead with this email was just created (id ${lead.id}), skipping create`,
         );
         return { created: false, lead };
       } catch (err) {
@@ -150,21 +168,23 @@ export class LeadsService {
             (err.status === HttpStatus.BAD_REQUEST ||
               err.status === HttpStatus.NOT_FOUND));
         if (!gone) throw err;
-        this.recentlyCreated.delete(dto.Email);
+        this.recentlyCreated.delete(key);
       }
     }
 
-    const existing = await this.findByEmail(dto.Email);
+    const existing = await this.findByEmail(tenantId, dto.Email);
     if (existing) {
       this.logger.log(
-        `Lead with this email already exists (id ${existing.id}), skipping create`,
+        `[${tenantId}] Lead with this email already exists (id ${existing.id}), skipping create`,
       );
       return { created: false, lead: existing };
     }
 
-    const res = await this.zoho.post<{ data: ZohoWriteResult[] }>(MODULE, {
-      data: [dto],
-    });
+    const res = await this.zoho.post<{ data: ZohoWriteResult[] }>(
+      tenantId,
+      MODULE,
+      { data: [dto] },
+    );
     const result = res?.data?.[0];
 
     // Zoho can report per-record failures inside an otherwise OK response.
@@ -178,7 +198,7 @@ export class LeadsService {
       );
     }
 
-    this.rememberCreated(dto.Email, result.details.id);
+    this.rememberCreated(key, result.details.id);
 
     return {
       created: true,
@@ -191,22 +211,22 @@ export class LeadsService {
     };
   }
 
-  private findRecentlyCreated(email: string): string | null {
-    const entry = this.recentlyCreated.get(email);
+  private findRecentlyCreated(key: string): string | null {
+    const entry = this.recentlyCreated.get(key);
     if (!entry) return null;
     if (entry.expiresAt < Date.now()) {
-      this.recentlyCreated.delete(email);
+      this.recentlyCreated.delete(key);
       return null;
     }
     return entry.id;
   }
 
-  private rememberCreated(email: string, id: string): void {
+  private rememberCreated(key: string, id: string): void {
     const now = Date.now();
-    for (const [key, entry] of this.recentlyCreated) {
-      if (entry.expiresAt < now) this.recentlyCreated.delete(key);
+    for (const [k, entry] of this.recentlyCreated) {
+      if (entry.expiresAt < now) this.recentlyCreated.delete(k);
     }
-    this.recentlyCreated.set(email, {
+    this.recentlyCreated.set(key, {
       id,
       expiresAt: now + RECENT_CREATE_TTL_MS,
     });

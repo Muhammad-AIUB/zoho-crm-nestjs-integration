@@ -6,7 +6,8 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Response } from 'express';
+import { TenantRequest } from '../../tenancy/tenant-id.decorator';
 import { ZohoApiError } from '../../zoho/zoho-api.error';
 
 interface ErrorBody {
@@ -32,10 +33,12 @@ export class ZohoExceptionFilter implements ExceptionFilter {
 
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
-    const req = ctx.getRequest<Request>();
+    const req = ctx.getRequest<TenantRequest>();
     const res = ctx.getResponse<Response>();
     const timestamp = new Date().toISOString();
     const route = `${req.method} ${req.path}`;
+    // Set by the TenantId decorator; lets a log line be traced to a tenant.
+    const tenant = req.tenantId;
 
     let body: ErrorBody;
 
@@ -47,11 +50,12 @@ export class ZohoExceptionFilter implements ExceptionFilter {
         path: req.path,
         timestamp,
       };
-      // Only safe fields are logged — ZohoApiError never carries tokens or secrets.
+      // Only safe fields are logged: ZohoApiError never carries tokens or secrets.
       this.logger.error(
         JSON.stringify({
           timestamp,
           route,
+          tenant,
           zohoEndpoint: exception.endpoint,
           zohoCode: exception.zohoCode,
           status: exception.status,
@@ -77,10 +81,12 @@ export class ZohoExceptionFilter implements ExceptionFilter {
       };
       if (status >= 500) {
         this.logger.error(
-          JSON.stringify({ timestamp, route, status, message }),
+          JSON.stringify({ timestamp, route, tenant, status, message }),
         );
       } else {
-        this.logger.warn(JSON.stringify({ timestamp, route, status, message }));
+        this.logger.warn(
+          JSON.stringify({ timestamp, route, tenant, status, message }),
+        );
       }
     } else {
       body = {
@@ -92,7 +98,7 @@ export class ZohoExceptionFilter implements ExceptionFilter {
       };
       const err = exception as Error;
       this.logger.error(
-        JSON.stringify({ timestamp, route, message: err?.message }),
+        JSON.stringify({ timestamp, route, tenant, message: err?.message }),
         err?.stack,
       );
     }

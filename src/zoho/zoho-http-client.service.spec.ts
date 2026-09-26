@@ -43,7 +43,7 @@ describe('ZohoHttpClient', () => {
   it('returns null on 204 No Content', async () => {
     request.mockResolvedValueOnce({ status: 204, data: '' });
     await expect(
-      client.get('/Leads/search', { email: 'x' }),
+      client.get('acme', '/Leads/search', { email: 'x' }),
     ).resolves.toBeNull();
   });
 
@@ -52,8 +52,8 @@ describe('ZohoHttpClient', () => {
       .mockRejectedValueOnce(zohoError(401, { code: 'INVALID_TOKEN' }))
       .mockResolvedValueOnce({ status: 200, data: { data: [] } });
 
-    await expect(client.get('/Leads')).resolves.toEqual({ data: [] });
-    expect(tokens.refreshAccessToken).toHaveBeenCalledWith('t1');
+    await expect(client.get('acme', '/Leads')).resolves.toEqual({ data: [] });
+    expect(tokens.refreshAccessToken).toHaveBeenCalledWith('acme', 't1');
     expect(request).toHaveBeenCalledTimes(2);
     expect(request.mock.calls[1][0].headers.Authorization).toBe(
       'Zoho-oauthtoken t2',
@@ -62,7 +62,7 @@ describe('ZohoHttpClient', () => {
 
   it('gives up after one retry (no retry loop)', async () => {
     request.mockRejectedValue(zohoError(401, { code: 'INVALID_TOKEN' }));
-    await expect(client.get('/Leads')).rejects.toMatchObject({
+    await expect(client.get('acme', '/Leads')).rejects.toMatchObject({
       status: 401,
       zohoCode: 'INVALID_TOKEN',
     });
@@ -72,7 +72,9 @@ describe('ZohoHttpClient', () => {
 
   it('does not spend a refresh on a scope mismatch', async () => {
     request.mockRejectedValue(zohoError(401, { code: 'OAUTH_SCOPE_MISMATCH' }));
-    await expect(client.get('/Leads')).rejects.toBeInstanceOf(ZohoApiError);
+    await expect(client.get('acme', '/Leads')).rejects.toBeInstanceOf(
+      ZohoApiError,
+    );
     expect(tokens.refreshAccessToken).not.toHaveBeenCalled();
   });
 
@@ -89,7 +91,7 @@ describe('ZohoHttpClient', () => {
         ],
       }),
     );
-    await expect(client.post('/Leads', {})).rejects.toMatchObject({
+    await expect(client.post('acme', '/Leads', {})).rejects.toMatchObject({
       status: 400,
       zohoCode: 'MANDATORY_NOT_FOUND',
       details: { api_name: 'Last_Name' },
@@ -107,14 +109,14 @@ describe('ZohoHttpClient', () => {
         .mockRejectedValueOnce(zohoError(502, 'Bad Gateway'))
         .mockResolvedValueOnce(ok);
 
-      await expect(client.get('/Leads')).resolves.toEqual({ data: [] });
+      await expect(client.get('acme', '/Leads')).resolves.toEqual({ data: [] });
       expect(request).toHaveBeenCalledTimes(3);
       expect(sleep).toHaveBeenCalledTimes(2);
     });
 
     it('stops after 2 retries and returns 502', async () => {
       request.mockRejectedValue(zohoError(503, 'Service Unavailable'));
-      await expect(client.get('/Leads')).rejects.toMatchObject({
+      await expect(client.get('acme', '/Leads')).rejects.toMatchObject({
         status: 502,
       });
       expect(request).toHaveBeenCalledTimes(3);
@@ -122,7 +124,7 @@ describe('ZohoHttpClient', () => {
 
     it('backs off longer on each retry', async () => {
       request.mockRejectedValue(zohoError(503, ''));
-      await client.get('/Leads').catch(() => undefined);
+      await client.get('acme', '/Leads').catch(() => undefined);
       const [first, second] = sleep.mock.calls.map(([ms]) => ms as number);
       expect(first).toBeGreaterThanOrEqual(300);
       expect(second).toBeGreaterThanOrEqual(900);
@@ -130,7 +132,7 @@ describe('ZohoHttpClient', () => {
 
     it('retries a GET on timeouts and network errors, then gives up', async () => {
       request.mockRejectedValue(networkError('ECONNABORTED'));
-      await expect(client.get('/Leads')).rejects.toMatchObject({
+      await expect(client.get('acme', '/Leads')).rejects.toMatchObject({
         status: 502,
         zohoCode: 'ZOHO_UNREACHABLE',
       });
@@ -139,7 +141,7 @@ describe('ZohoHttpClient', () => {
 
     it('never retries 4xx errors', async () => {
       request.mockRejectedValue(zohoError(400, { code: 'INVALID_DATA' }));
-      await expect(client.get('/Leads')).rejects.toMatchObject({
+      await expect(client.get('acme', '/Leads')).rejects.toMatchObject({
         status: 400,
       });
       expect(request).toHaveBeenCalledTimes(1);
@@ -147,11 +149,11 @@ describe('ZohoHttpClient', () => {
 
     it('does not retry a POST on 5xx or timeout (it may already have been created)', async () => {
       request.mockRejectedValueOnce(zohoError(500, ''));
-      await expect(client.post('/Leads', {})).rejects.toMatchObject({
+      await expect(client.post('acme', '/Leads', {})).rejects.toMatchObject({
         status: 502,
       });
       request.mockRejectedValueOnce(networkError('ECONNABORTED'));
-      await expect(client.post('/Leads', {})).rejects.toMatchObject({
+      await expect(client.post('acme', '/Leads', {})).rejects.toMatchObject({
         zohoCode: 'ZOHO_UNREACHABLE',
       });
       expect(request).toHaveBeenCalledTimes(2);
@@ -162,7 +164,9 @@ describe('ZohoHttpClient', () => {
         .mockRejectedValueOnce(zohoError(429, { code: 'TOO_MANY_REQUESTS' }))
         .mockRejectedValueOnce(networkError('ECONNREFUSED'))
         .mockResolvedValueOnce(ok);
-      await expect(client.post('/Leads', {})).resolves.toEqual({ data: [] });
+      await expect(client.post('acme', '/Leads', {})).resolves.toEqual({
+        data: [],
+      });
       expect(request).toHaveBeenCalledTimes(3);
     });
   });

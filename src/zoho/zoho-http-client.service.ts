@@ -47,26 +47,32 @@ export class ZohoHttpClient {
     });
   }
 
-  get<T>(path: string, params?: ZohoRequestOptions['params']) {
-    return this.request<T>('GET', path, { params });
+  get<T>(
+    tenantId: string,
+    path: string,
+    params?: ZohoRequestOptions['params'],
+  ) {
+    return this.request<T>(tenantId, 'GET', path, { params });
   }
 
-  post<T>(path: string, data: unknown) {
-    return this.request<T>('POST', path, { data });
+  post<T>(tenantId: string, path: string, data: unknown) {
+    return this.request<T>(tenantId, 'POST', path, { data });
   }
 
   /**
+   * Calls Zoho as the given tenant, using that tenant's own token.
    * Returns the parsed body, or null when Zoho answers 204 No Content
    * (which it does for empty lists and searches with no match).
    */
   async request<T>(
+    tenantId: string,
     method: Method,
     path: string,
     options: ZohoRequestOptions = {},
     isRetry = false,
   ): Promise<T | null> {
     const endpoint = `${method} /crm/v2${path}`;
-    const token = await this.tokenService.getAccessToken();
+    const token = await this.tokenService.getAccessToken(tenantId);
 
     try {
       const res = await this.sendWithRetry<T>(
@@ -99,8 +105,8 @@ export class ZohoHttpClient {
         !isRetry &&
         error.code !== 'OAUTH_SCOPE_MISMATCH'
       ) {
-        await this.tokenService.refreshAccessToken(token);
-        return this.request<T>(method, path, options, true);
+        await this.tokenService.refreshAccessToken(tenantId, token);
+        return this.request<T>(tenantId, method, path, options, true);
       }
 
       throw new ZohoApiError(

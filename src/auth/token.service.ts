@@ -19,8 +19,12 @@ export class TokenService {
   private readonly clientSecret: string;
   private readonly redirectUri: string;
 
-  /** Shared promise so parallel requests trigger only one refresh call. */
-  private refreshInFlight: Promise<string> | null = null;
+  /**
+   * One in-flight refresh per tenant: parallel requests for the same tenant
+   * share a single refresh call, while different tenants never wait on each
+   * other.
+   */
+  private readonly refreshInFlight = new Map<string, Promise<string>>();
 
   constructor(
     config: ConfigService,
@@ -33,7 +37,7 @@ export class TokenService {
   }
 
   /** Swap the one-time authorization code for access + refresh tokens. */
-  async exchangeCode(code: string): Promise<StoredTokens> {
+  async exchangeCode(tenantId: string, code: string): Promise<StoredTokens> {
     const data = await this.requestToken({
       grant_type: 'authorization_code',
       code,
@@ -51,26 +55,19 @@ export class TokenService {
     }
 
     const tokens = this.toStoredTokens(data, data.refresh_token);
-    await this.store.save(tokens);
+    await this.store.save(tenantId, tokens);
     return tokens;
   }
 
-  /** Returns a usable access token, refreshing it first if needed. */
-  async getAccessToken(): Promise<string> {
-    const tokens = await this.store.read();
-    if (!tokens) {
-      throw new ZohoApiError(
-        HttpStatus.UNAUTHORIZED,
-        'NOT_AUTHORIZED',
-        'No Zoho tokens found. Visit /oauth/login to connect your Zoho account.',
-        'local token store',
-      );
-    }
+  /** Returns a usable access token for the tenant, refreshing it if needed. */
+  async getAccessToken(tenantId: string): Promise<string> {
+    const tokens = await this.store.read(tenantId);
+    if (!tokens) throw this.notConnected(tenantId);
 
     if (Date.now() < tokens.expires_at - EXPIRY_BUFFER_MS) {
       return tokens.access_token;
     }
-    return this.refreshAccessToken();
+    return this.refreshAccessToken(tenantId);
   }
 
   /**
@@ -79,17 +76,34 @@ export class TokenService {
    * new one instead of refreshing again. Zoho only allows ~10 refreshes per
    * 10 minutes, so a burst of 401s must not turn into a burst of refreshes.
    */
-  async refreshAccessToken(rejectedToken?: string): Promise<string> {
-    if (!this.refreshInFlight) {
-      this.refreshInFlight = this.doRefresh(rejectedToken).finally(() => {
-        this.refreshInFlight = null;
+  async refreshAccessToken(
+    tenantId: string,
+    rejectedToken?: string,
+  ): Promise<string> {
+    let inFlight = this.refreshInFlight.get(tenantId);
+    if (!inFlight) {
+      inFlight = this.doRefresh(tenantId, rejectedToken).finally(() => {
+        this.refreshInFlight.delete(tenantId);
       });
+      this.refreshInFlight.set(tenantId, inFlight);
     }
-    return this.refreshInFlight;
+    return inFlight;
   }
 
-  private async doRefresh(rejectedToken?: string): Promise<string> {
-    const current = await this.store.read();
+  private notConnected(tenantId: string): ZohoApiError {
+    return new ZohoApiError(
+      HttpStatus.UNAUTHORIZED,
+      'NOT_AUTHORIZED',
+      `Tenant "${tenantId}" has not connected a Zoho account. Visit /oauth/login?tenant=${tenantId} to connect it.`,
+      'local token store',
+    );
+  }
+
+  private async doRefresh(
+    tenantId: string,
+    rejectedToken?: string,
+  ): Promise<string> {
+    const current = await this.store.read(tenantId);
     if (
       rejectedToken &&
       current &&
@@ -98,24 +112,17 @@ export class TokenService {
     ) {
       return current.access_token;
     }
-    if (!current?.refresh_token) {
-      throw new ZohoApiError(
-        HttpStatus.UNAUTHORIZED,
-        'NOT_AUTHORIZED',
-        'No refresh token available. Visit /oauth/login to connect your Zoho account.',
-        'local token store',
-      );
-    }
+    if (!current?.refresh_token) throw this.notConnected(tenantId);
 
-    this.logger.log('Access token expired, refreshing');
+    this.logger.log(`Refreshing access token for tenant "${tenantId}"`);
     const data = await this.requestToken({
       grant_type: 'refresh_token',
       refresh_token: current.refresh_token,
     });
 
-    // Zoho does not send a new refresh token on refresh — keep the old one.
+    // Zoho does not send a new refresh token on refresh, so keep the old one.
     const tokens = this.toStoredTokens(data, current.refresh_token);
-    await this.store.save(tokens);
+    await this.store.save(tenantId, tokens);
     return tokens.access_token;
   }
 
