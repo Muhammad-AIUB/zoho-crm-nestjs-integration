@@ -109,18 +109,61 @@ describe('App (no Zoho connection yet)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('POST /leads validates the body', async () => {
-    const res = record(
-      await request(app.getHttpServer())
+  describe('POST /leads validation messages', () => {
+    const valid = {
+      First_Name: 'Test',
+      Last_Name: 'Candidate',
+      Company: 'W3SCLOUD Assessment',
+      Email: 'test@example.com',
+    };
+    const post = (body: object) =>
+      request(app.getHttpServer())
         .post('/leads')
         .set('X-Tenant-Id', 'acme')
-        .send({ First_Name: 'A', Email: 'not-an-email' }),
+        .send(body);
+    const without = (field: keyof typeof valid) => {
+      const body: Record<string, string> = { ...valid };
+      delete body[field];
+      return body;
+    };
+
+    it.each([
+      ['Email', 'Email is required'],
+      ['Last_Name', 'Last_Name is required'],
+      ['Company', 'Company is required'],
+    ] as const)(
+      'missing %s → 400 "%s" (exact message)',
+      async (field, message) => {
+        const res = record(await post(without(field)));
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('BAD_REQUEST');
+        expect(res.body.message).toEqual([message]);
+      },
     );
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('BAD_REQUEST');
-    expect(res.body.message).toEqual(
-      expect.arrayContaining([expect.stringContaining('Last_Name')]),
-    );
+
+    it('blank (whitespace-only) required fields count as missing', async () => {
+      const res = record(await post({ ...valid, Last_Name: '   ' }));
+      expect(res.body.message).toEqual(['Last_Name is required']);
+    });
+
+    it('reports one clear message per bad field', async () => {
+      const res = record(
+        await post({ First_Name: 'A', Email: 'not-an-email' }),
+      );
+      expect(res.status).toBe(400);
+      expect([...res.body.message].sort()).toEqual([
+        'Company is required',
+        'Email must be a valid email address',
+        'Last_Name is required',
+      ]);
+    });
+
+    it('still reports length limits for values that are present', async () => {
+      const res = record(await post({ ...valid, Last_Name: 'x'.repeat(81) }));
+      expect(res.body.message).toEqual([
+        'Last_Name must be shorter than or equal to 80 characters',
+      ]);
+    });
   });
 
   it('POST /leads rejects unknown fields', async () => {

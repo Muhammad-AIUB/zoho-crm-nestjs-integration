@@ -13,33 +13,40 @@ const trim = ({ value }: { value: unknown }) =>
 
 /**
  * Field names match Zoho's API names so the DTO can be sent as-is.
- * Last_Name and Company are mandatory in Zoho's Leads layout; Email is
- * required here because we use it to detect duplicates.
+ * Last_Name is mandatory in Zoho, Company is required by most Leads
+ * layouts, and Email is required here because we use it to detect
+ * duplicates.
+ *
+ * Rule order matters: class-validator runs a property's rules bottom-up,
+ * and the ValidationPipe uses stopAtFirstError. So the "required" rule sits
+ * closest to the property (runs first), then the type check, then length.
+ * Otherwise a missing field is reported as "must be shorter than N".
  */
 export class CreateLeadDto {
   @IsOptional()
   @Transform(trim)
-  @IsString()
   @MaxLength(40)
+  @IsString()
   First_Name?: string;
 
   @Transform(trim)
-  @IsString()
-  @IsNotEmpty()
   @MaxLength(80)
+  @IsString()
+  @IsNotEmpty({ message: 'Last_Name is required' })
   Last_Name: string;
 
   @Transform(trim)
-  @IsString()
-  @IsNotEmpty()
   @MaxLength(200)
+  @IsString()
+  @IsNotEmpty({ message: 'Company is required' })
   Company: string;
 
   @Transform(({ value }) =>
     typeof value === 'string' ? value.trim().toLowerCase() : value,
   )
-  @IsEmail()
   @MaxLength(100)
+  @IsEmail({}, { message: 'Email must be a valid email address' })
+  @IsNotEmpty({ message: 'Email is required' })
   Email: string;
 
   @IsOptional()
