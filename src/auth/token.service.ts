@@ -141,9 +141,15 @@ export class TokenService {
     // Zoho reports OAuth errors as HTTP 200 with { error: "..." }.
     if (data.error || !data.access_token) {
       const code = (data.error ?? 'UNKNOWN').toUpperCase();
-      const unauthorized = ['INVALID_CODE', 'INVALID_CLIENT', 'INVALID_CLIENT_SECRET'];
+      const unauthorized = [
+        'INVALID_CODE',
+        'INVALID_CLIENT',
+        'INVALID_CLIENT_SECRET',
+      ];
       throw new ZohoApiError(
-        unauthorized.includes(code) ? HttpStatus.UNAUTHORIZED : HttpStatus.BAD_REQUEST,
+        unauthorized.includes(code)
+          ? HttpStatus.UNAUTHORIZED
+          : HttpStatus.BAD_REQUEST,
         code,
         code === 'INVALID_CODE'
           ? 'The authorization code or refresh token is invalid or expired. Visit /oauth/login again.'
