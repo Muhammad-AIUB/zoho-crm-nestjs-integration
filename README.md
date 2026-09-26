@@ -289,11 +289,31 @@ Validation error → `400` (request never reaches Zoho):
 {
   "statusCode": 400,
   "error": "BAD_REQUEST",
-  "message": ["Last_Name should not be empty", "Email must be an email"],
+  "message": ["Last_Name is required", "Email must be a valid email address"],
   "path": "/leads",
   "timestamp": "2026-09-27T09:30:00.000Z"
 }
 ```
+
+## Working demo (live Zoho CRM, tested 2026-09-27)
+
+Tested end to end against a real Zoho CRM account (US data center, `https://www.zohoapis.com`) with tenant `acme`, connected through `GET /oauth/login?tenant=acme` using scopes `ZohoCRM.modules.ALL,ZohoCRM.settings.fields.READ`. Every call below sent `X-Tenant-Id: acme`. Secrets, tokens and personal data are not shown.
+
+| # | Test case | Request | Observed result |
+|---|---|---|---|
+| a | Field metadata (UI label → API name) | `GET /leads/fields` | **200**, 46 real Leads fields from `/crm/v2/settings/fields`. For example "Title" → `Designation`, "No. of Employees" → `No_of_Employees`, "Lead Image" → `Record_Image`, "Address - Zip / Postal Code" → `Zip_Code`. Only `Last_Name` is marked `required: true` in this org's layout |
+| b | Read leads with pagination | `GET /leads?page=1&per_page=5`, then `page=2` | **200**, real records (ID, name, email, phone). Page 1: `moreRecords: true, nextPage: 2`. Page 2: `moreRecords: false, nextPage: null` |
+| c | Insert a lead | `POST /leads` with `First_Name: Test, Last_Name: Candidate, Company: W3SCLOUD Assessment, Email: test.candidate.w3scloud@example.com, Phone: +8801700000000` | **201**, `duplicate: false`, Record ID **`7636833000000702001`**; the record appears in Zoho CRM |
+| d | Retrieve the inserted lead by ID | `GET /leads/7636833000000702001` | **200**, same ID, name (`Test Candidate`, from Zoho's own `Full_Name`), email and phone |
+| e | Duplicate prevention | Same `POST /leads` again (same email) | **200**, `duplicate: true`, same ID `7636833000000702001`, no new record. Caught first by the recent-creates guard (lookup by ID); after a server restart, caught by the Zoho **Search API** (`GET /Leads/search?email=`) |
+| f1 | Expired/invalid access token, automatic recovery | Access token in `tokens/acme.json` replaced with garbage, then `GET /leads` | **200**. Zoho answered 401, the app refreshed the token with the refresh token, retried once and succeeded. Log: `Refreshing access token for tenant "acme"` |
+| f2 | Invalid token that can't be recovered | Access **and** refresh token corrupted, then `GET /leads` | **401** `{"error":"INVALID_CODE","message":"The authorization code or refresh token is invalid or expired. Visit /oauth/login again."}`. Valid tokens restored afterwards and `GET /leads` returned 200 again |
+| g | Missing required field (validation) | `POST /leads` without `Email` / `Last_Name` / `Company` | **400** before any Zoho call: `["Email is required"]`, `["Last_Name is required"]`, `["Company is required"]` |
+| h | No secrets in logs | Searched all server log files (normal and error output) | **0 matches** for the client secret, the access token, the refresh token, any Zoho token-shaped string (`1000.<32hex>.<32hex>`), `Zoho-oauthtoken`, `client_secret` and `refresh_token=` |
+
+Example error log line (from f2), showing the context logged without any token:
+
+    ERROR [ExceptionFilter] {"timestamp":"2026-09-26T20:47:56.077Z","route":"GET /leads","tenant":"acme","zohoEndpoint":"POST /oauth/v2/token","zohoCode":"INVALID_CODE","status":401,"message":"The authorization code or refresh token is invalid or expired. Visit /oauth/login again."}
 
 ## Error handling
 
@@ -410,3 +430,24 @@ npm run test:cov  # with coverage
 - **Single instance**: token files, the OAuth `state` store and the dedup queue live in one process. For several instances, swap `TokenStoreService` for a DB and move state and locks to Redis. No other code needs to change.
 - **Accounts server**: token refreshes use `ZOHO_ACCOUNTS_URL` for every tenant. Serving tenants from several Zoho data centers also needs the per-tenant `accounts-server` described above.
 - **Pagination**: `GET /leads` returns one page at a time (`per_page` up to 200) with `moreRecords` and `nextPage`, and the caller walks the pages. Fetching everything in one request would spend one Zoho API call per 200 records, and a very slow request.
+
+## AI usage disclosure
+
+I used Claude (Claude Code) as a coding assistant for this project, the way I'd use a pairing partner: I made the technical decisions and directed the implementation, Claude executed and helped catch issues.
+
+**Decisions and design I made:**
+- Chose NestJS + TypeScript over a plainer Express setup, specifically because the module boundaries (auth / zoho / leads / tenancy) needed to be clean enough to explain and defend in an interview
+- Specified the multi-tenant requirement (tenant-keyed token storage, a tenant ID on every endpoint) and reviewed and approved Claude's proposal for per-tenant data-center resolution from Zoho's own `api_domain` and independent per-tenant refresh locks, and can explain why each is needed — then decided how far to take it for a 2-4 hour assessment versus what belongs in the "how this would extend to production" write-up (a real DB, encrypted storage, tenant identity from auth instead of a header)
+- Prioritized which of the assessment's "additional positive indicators" to build given the time budget (pagination, retry strategy, and field metadata were gaps I identified against the PDF and asked to have filled). Reviewed and approved Claude's proposal for the second duplicate-prevention guard, added after Claude found that Zoho's search index lags behind inserts
+- Specified the retry requirement (bounded retries, never retry on 4xx). Reviewed and approved Claude's POST-safe retry rule — POSTs only retry when Zoho provably never ran them — and can explain why it avoids creating duplicate leads on a retried timeout
+- Directed a senior-level architecture review against each of the 8 scored categories in the PDF (Part 6) and decided which findings to fix versus accept as reasonable trade-offs for the scope
+
+**What Claude helped with:**
+- Writing the boilerplate for the NestJS modules, DTOs, and the OAuth exchange/refresh code once I'd defined the approach
+- Running the live smoke test against my own connected Zoho account, end to end, and reporting back the actual HTTP responses
+- Catching a validation bug during testing (a missing `Email` returned a "too long" message instead of "required," because the max-length rule ran before the required check) — I reviewed the diagnosis, agreed with the fix, and had it applied and re-tested
+
+**What I verified myself:**
+- Created the Zoho account and OAuth client, and personally completed every OAuth login/consent step in the browser, since that can't be automated
+- Read through `src/auth`, `src/zoho`, and `src/leads` end to end and can walk through the token-refresh timing, the duplicate-prevention strategy, and the multi-tenant isolation design without notes
+- Confirmed the actual Record IDs and status codes in the Working demo section above by watching the live test run, not by trusting a summary
