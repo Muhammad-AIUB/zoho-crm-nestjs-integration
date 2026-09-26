@@ -29,3 +29,4 @@ NestJS + TypeScript service that talks to the Zoho CRM v2 API:
 - `npm run start:dev` — run locally
 - `npm run build` — typecheck and compile
 - `npm run lint` — lint
+- `npm test` — unit + e2e smoke tests (no Zoho account needed)
