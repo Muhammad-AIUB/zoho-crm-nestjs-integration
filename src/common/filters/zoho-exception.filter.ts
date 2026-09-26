@@ -104,6 +104,10 @@ export class ZohoExceptionFilter implements ExceptionFilter {
   private friendlyZohoMessage(err: ZohoApiError): string {
     const field = (err.details?.api_name as string | undefined) ?? undefined;
 
+    if (err.zohoCode === 'OAUTH_SCOPE_MISMATCH') {
+      // Not an expired token: the grant is missing a permission.
+      return 'The Zoho connection is missing a required permission (OAuth scope). Reconnect via /oauth/login to grant the current scopes.';
+    }
     if (AUTH_CODES.has(err.zohoCode)) {
       return err.zohoCode === 'NOT_AUTHORIZED' ||
         err.zohoCode === 'INVALID_CODE'
