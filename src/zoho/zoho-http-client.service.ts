@@ -1,5 +1,4 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance, AxiosResponse, Method } from 'axios';
 import { TokenService } from '../auth/token.service';
 import { ZohoApiError } from './zoho-api.error';
@@ -37,14 +36,9 @@ export class ZohoHttpClient {
   private readonly logger = new Logger(ZohoHttpClient.name);
   private readonly http: AxiosInstance;
 
-  constructor(
-    config: ConfigService,
-    private readonly tokenService: TokenService,
-  ) {
-    this.http = axios.create({
-      baseURL: `${config.getOrThrow<string>('ZOHO_API_DOMAIN')}/crm/v2`,
-      timeout: 15_000,
-    });
+  constructor(private readonly tokenService: TokenService) {
+    // No fixed baseURL: each tenant may live in a different Zoho data center.
+    this.http = axios.create({ timeout: 15_000 });
   }
 
   get<T>(
@@ -73,11 +67,12 @@ export class ZohoHttpClient {
   ): Promise<T | null> {
     const endpoint = `${method} /crm/v2${path}`;
     const token = await this.tokenService.getAccessToken(tenantId);
+    const apiDomain = await this.tokenService.getApiDomain(tenantId);
 
     try {
       const res = await this.sendWithRetry<T>(
         method,
-        path,
+        `${apiDomain}/crm/v2${path}`,
         options,
         token,
         endpoint,
@@ -126,7 +121,7 @@ export class ZohoHttpClient {
    */
   private async sendWithRetry<T>(
     method: Method,
-    path: string,
+    url: string,
     options: ZohoRequestOptions,
     token: string,
     endpoint: string,
@@ -135,7 +130,7 @@ export class ZohoHttpClient {
       try {
         return await this.http.request<T>({
           method,
-          url: path,
+          url,
           params: options.params,
           data: options.data,
           headers: { Authorization: `Zoho-oauthtoken ${token}` },

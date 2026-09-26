@@ -11,6 +11,13 @@ import { TokenStoreService } from './token-store.service';
 /** Refresh a bit early so a token never expires mid-request. */
 const EXPIRY_BUFFER_MS = 60_000;
 
+/**
+ * Zoho's API host for each data center (US, EU, IN, AU, JP, CN, CA, SA).
+ * The access token is sent to this host, so only real Zoho hosts are used.
+ */
+const ZOHO_API_DOMAIN_PATTERN =
+  /^https:\/\/www\.zohoapis\.(com|eu|in|com\.au|jp|com\.cn|ca|sa)$/;
+
 @Injectable()
 export class TokenService {
   private readonly logger = new Logger(TokenService.name);
@@ -18,6 +25,7 @@ export class TokenService {
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly redirectUri: string;
+  private readonly defaultApiDomain: string;
 
   /**
    * One in-flight refresh per tenant: parallel requests for the same tenant
@@ -34,6 +42,24 @@ export class TokenService {
     this.clientId = config.getOrThrow<string>('ZOHO_CLIENT_ID');
     this.clientSecret = config.getOrThrow<string>('ZOHO_CLIENT_SECRET');
     this.redirectUri = config.getOrThrow<string>('ZOHO_REDIRECT_URI');
+    this.defaultApiDomain = config.getOrThrow<string>('ZOHO_API_DOMAIN');
+  }
+
+  /**
+   * Each Zoho org lives in one data center, and the token response tells us
+   * which (`api_domain`, e.g. https://www.zohoapis.eu). Using it per tenant
+   * means an EU customer and a US customer can both be served by the same
+   * app. Falls back to ZOHO_API_DOMAIN if it's missing or not a Zoho host.
+   */
+  async getApiDomain(tenantId: string): Promise<string> {
+    const domain = (await this.store.read(tenantId))?.api_domain;
+    if (domain && ZOHO_API_DOMAIN_PATTERN.test(domain)) return domain;
+    if (domain) {
+      this.logger.warn(
+        `Ignoring unexpected api_domain for tenant "${tenantId}", using ${this.defaultApiDomain}`,
+      );
+    }
+    return this.defaultApiDomain;
   }
 
   /** Swap the one-time authorization code for access + refresh tokens. */

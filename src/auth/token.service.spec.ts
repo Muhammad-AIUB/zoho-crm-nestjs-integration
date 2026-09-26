@@ -15,6 +15,7 @@ const config = {
       ZOHO_CLIENT_ID: 'client-id',
       ZOHO_CLIENT_SECRET: SECRET,
       ZOHO_REDIRECT_URI: 'http://localhost:3000/oauth/callback',
+      ZOHO_API_DOMAIN: 'https://www.zohoapis.com',
     })[key],
 } as unknown as ConfigService;
 
@@ -127,6 +128,35 @@ describe('TokenService', () => {
     expect(err).toBeInstanceOf(ZohoApiError);
     expect(JSON.stringify(err)).not.toContain(SECRET);
     expect((err as Error).message).not.toContain(SECRET);
+  });
+
+  describe('getApiDomain', () => {
+    it("uses the tenant's own data center from the token response", async () => {
+      store.byTenant.set('eu-tenant', {
+        ...tokensExpiringIn(60_000),
+        api_domain: 'https://www.zohoapis.eu',
+      });
+      await expect(service.getApiDomain('eu-tenant')).resolves.toBe(
+        'https://www.zohoapis.eu',
+      );
+    });
+
+    it('falls back to ZOHO_API_DOMAIN when none is stored', async () => {
+      store.byTenant.set('acme', tokensExpiringIn(60_000));
+      await expect(service.getApiDomain('acme')).resolves.toBe(
+        'https://www.zohoapis.com',
+      );
+    });
+
+    it('never sends the token to a host that is not Zoho', async () => {
+      store.byTenant.set('acme', {
+        ...tokensExpiringIn(60_000),
+        api_domain: 'https://www.zohoapis.com.evil.example',
+      });
+      await expect(service.getApiDomain('acme')).resolves.toBe(
+        'https://www.zohoapis.com',
+      );
+    });
   });
 
   describe('tenant isolation', () => {

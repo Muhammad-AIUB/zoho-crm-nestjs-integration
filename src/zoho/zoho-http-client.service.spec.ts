@@ -1,12 +1,7 @@
-import { ConfigService } from '@nestjs/config';
 import { AxiosInstance } from 'axios';
 import { TokenService } from '../auth/token.service';
 import { ZohoApiError } from './zoho-api.error';
 import { ZohoHttpClient } from './zoho-http-client.service';
-
-const config = {
-  getOrThrow: () => 'https://www.zohoapis.com',
-} as unknown as ConfigService;
 
 const zohoError = (status: number, data: unknown) =>
   Object.assign(new Error(`HTTP ${status}`), {
@@ -16,7 +11,11 @@ const zohoError = (status: number, data: unknown) =>
 
 describe('ZohoHttpClient', () => {
   let currentToken: string;
-  let tokens: { getAccessToken: jest.Mock; refreshAccessToken: jest.Mock };
+  let tokens: {
+    getAccessToken: jest.Mock;
+    refreshAccessToken: jest.Mock;
+    getApiDomain: jest.Mock;
+  };
   let client: ZohoHttpClient;
   let request: jest.SpyInstance;
   let sleep: jest.SpyInstance;
@@ -29,8 +28,13 @@ describe('ZohoHttpClient', () => {
         currentToken = 't2';
         return currentToken;
       }),
+      getApiDomain: jest.fn(async (tenant: string) =>
+        tenant === 'eu-tenant'
+          ? 'https://www.zohoapis.eu'
+          : 'https://www.zohoapis.com',
+      ),
     };
-    client = new ZohoHttpClient(config, tokens as unknown as TokenService);
+    client = new ZohoHttpClient(tokens as unknown as TokenService);
     const http = (client as unknown as { http: AxiosInstance }).http;
     request = jest.spyOn(http, 'request');
     sleep = jest
@@ -39,6 +43,21 @@ describe('ZohoHttpClient', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it("calls each tenant's own Zoho data center with that tenant's token", async () => {
+    request.mockResolvedValue({ status: 200, data: {} });
+    await client.get('acme', '/Leads');
+    await client.get('eu-tenant', '/Leads');
+
+    expect(tokens.getAccessToken).toHaveBeenNthCalledWith(1, 'acme');
+    expect(tokens.getAccessToken).toHaveBeenNthCalledWith(2, 'eu-tenant');
+    expect(request.mock.calls[0][0].url).toBe(
+      'https://www.zohoapis.com/crm/v2/Leads',
+    );
+    expect(request.mock.calls[1][0].url).toBe(
+      'https://www.zohoapis.eu/crm/v2/Leads',
+    );
+  });
 
   it('returns null on 204 No Content', async () => {
     request.mockResolvedValueOnce({ status: 204, data: '' });
