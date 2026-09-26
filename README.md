@@ -19,8 +19,43 @@ src/
 ├── common/filters/
 │   └── zoho-exception.filter.ts  global filter: clean JSON errors + context logging
 ├── config/env.validation.ts  fails fast if required env vars are missing
+├── app.module.ts             wires modules, validation pipe, error filter, rate limiter
 └── main.ts
+test/app.e2e-spec.ts          HTTP-level smoke tests
 ```
+
+## Architecture
+
+Three modules, each with one job. Dependencies only point one way: `leads → zoho → auth`.
+
+```
+            HTTP client
+                 │
+   ┌─────────────┴───────────────┐
+   │  ThrottlerGuard (per IP)     │   global: 60 req/min, /oauth: 10 req/min
+   │  ValidationPipe (DTOs)       │   rejects bad input before any Zoho call
+   └─────────────┬───────────────┘
+                 │
+  AuthController │ LeadsController        controllers: HTTP only, no logic
+                 │        │
+   AuthService   │   LeadsService         business rules (state check, dedup)
+   TokenService ◄┼── ZohoHttpClient       single place that talks to the CRM API
+   TokenStore    │        │
+   (tokens.json) │        ▼
+                 │  www.zohoapis.com/crm/v2
+                 ▼
+     accounts.zoho.com/oauth/v2
+                 │
+   ZohoExceptionFilter (global)           every error → one JSON shape + one log line
+```
+
+A `POST /leads` request, end to end:
+
+1. `ThrottlerGuard` checks the caller's rate limit.
+2. `ValidationPipe` validates the body against `CreateLeadDto` (required fields, email format, no unknown fields). Invalid input stops here, and Zoho is never called.
+3. `LeadsService.create` queues the request behind any in-flight create for the same email (see *Duplicate prevention*).
+4. `ZohoHttpClient` asks `TokenService` for a valid token (refreshing it if needed), calls `GET /Leads/search?email=`, then `POST /Leads`.
+5. Any failure becomes a `ZohoApiError`, which the global filter turns into clean JSON and a structured log line.
 
 ## Requirements
 
@@ -73,7 +108,7 @@ This must be done once before calling any `/leads` endpoint.
 1. Start the server.
 2. Open **http://localhost:3000/oauth/login** in a browser.
 3. You are redirected to Zoho's consent screen (`scope=ZohoCRM.modules.ALL`, `access_type=offline`, `prompt=consent`). Log in and click **Accept**.
-4. Zoho redirects back to `/oauth/callback?code=...`. The server exchanges the code for an access token and refresh token and saves them to `tokens.json`. You'll see:
+4. Zoho redirects back to `/oauth/callback?code=...&state=...`. The server checks the `state` (see below), exchanges the code for an access token and refresh token, and saves them to `tokens.json`. You'll see:
 
 ```json
 {
@@ -83,6 +118,8 @@ This must be done once before calling any `/leads` endpoint.
 ```
 
 Tokens are never returned in responses or written to logs.
+
+**How the `state` check works (CSRF protection, RFC 6749 §10.12).** `/oauth/login` generates 128 random bits with `crypto.randomBytes`, stores them server-side for 10 minutes, and also sets them in an `HttpOnly`, `SameSite=Lax` cookie. The callback only accepts the code if the `state` in the URL matches the cookie, matches a state the server issued, and hasn't been used yet. It is deleted on first use, so it can't be replayed. The cookie check stops login CSRF, where an attacker completes consent with their own Zoho account and tricks another browser into opening the callback link. Start and finish the flow in the same browser.
 
 ## Endpoints
 
@@ -222,6 +259,7 @@ A global exception filter turns every Zoho failure into the same JSON shape, wit
 | Bad module | 400 | `INVALID_MODULE` | The requested Zoho CRM module does not exist or is not supported. |
 | Missing field | 400 | `MANDATORY_NOT_FOUND` | Required field "Last_Name" is missing. |
 | Bad data / record ID | 400 | `INVALID_DATA` | Invalid value for field "Email". |
+| Caller over the rate limit | 429 | `TOO_MANY_REQUESTS` | Too many requests. Please wait a minute and try again. |
 | Too many token refreshes | 429 | `ACCESS_DENIED` | Zoho is rate-limiting token requests. Please retry in a few minutes. |
 | Wrong client ID/secret/redirect URI in `.env` | 500 | `INVALID_CLIENT` | Zoho rejected this server's OAuth client settings. Check ZOHO_CLIENT_ID, ... |
 | Zoho down / 5xx | 502 | `ZOHO_UNREACHABLE` | Could not reach the Zoho CRM API. Please try again. |
@@ -239,11 +277,46 @@ The logged error object is built by hand from safe fields, so the client secret,
 - After the OAuth callback, `tokens.json` holds the `access_token`, `refresh_token` and an `expires_at` timestamp (Zoho access tokens last 1 hour).
 - Every Zoho call goes through `ZohoHttpClient`, which asks `TokenService.getAccessToken()` for a token.
 - If the token expires within the next 60 seconds, `TokenService` calls `POST {ZOHO_ACCOUNTS_URL}/oauth/v2/token` with `grant_type=refresh_token`, saves the new access token (keeping the existing refresh token, since Zoho doesn't issue a new one) and returns it.
-- If Zoho still answers `401` (e.g. token revoked early), the client forces one refresh and retries the request once.
-- Concurrent requests share a single in-flight refresh, so a burst of calls doesn't trigger several refreshes.
-- Nothing is hardcoded — if the refresh token itself is revoked, the API returns `401` asking you to run `/oauth/login` again.
+- Why 60 seconds early: `expires_at` is computed when the response arrives, so it's already a little late. The buffer also means a token can't expire between the check and the request reaching Zoho.
+- If Zoho still answers `401` (e.g. the token was revoked early), the client refreshes and retries the request **once**. A second 401 is returned to the caller, so it can't loop. Retrying a POST here is safe because a 401 means Zoho rejected the request before running it.
+- Concurrent requests share a single in-flight refresh. After a burst of 401s, the refresh is skipped if another request already replaced the rejected token. This matters because Zoho allows only about 10 access tokens per 10 minutes, and going over locks you out (`ACCESS_DENIED` → 429).
+- `OAUTH_SCOPE_MISMATCH` is not retried, since a new token wouldn't fix it.
+- Nothing is hardcoded. If the refresh token itself is revoked, the API returns `401` asking you to run `/oauth/login` again.
+
+## Duplicate prevention
+
+`POST /leads` must not create two leads with the same email. A plain "search, then create" has two gaps, and each has its own guard:
+
+| Gap | Guard |
+|---|---|
+| Two requests arrive at once; both searches find nothing, and both create | Creates for the same email are queued in memory and run one after another |
+| Zoho's search index lags a few seconds behind inserts, so a retry right after a create finds nothing | The service remembers leads it created in the last 10 minutes and looks them up **by ID**, which doesn't depend on the search index |
+
+If a remembered lead was deleted in Zoho since, the service falls back to a normal search and create.
+
+These guards are per process. With several instances behind a load balancer you'd need a shared lock (e.g. Redis `SET NX` keyed by email) or a unique `Email` field configured in Zoho, which makes Zoho reject duplicates with `DUPLICATE_DATA`.
+
+## Security
+
+- **Secrets**: loaded only from env via `@nestjs/config` and validated with Joi at startup. `.env` and `tokens.json` are git-ignored, and `tokens.json` is written with `0600` permissions.
+- **No secret in logs or responses**: `ZohoApiError` carries only safe fields. Raw axios errors (whose config contains the client secret or `Authorization` header) are never logged or rethrown. Token-file parse errors aren't logged verbatim either, because Node's JSON error messages quote part of the file. The unit and e2e tests check that the secret never appears in thrown errors or response bodies.
+- **Input**: DTO validation with `whitelist` + `forbidNonWhitelisted`, record IDs must be numeric, and emails are normalised to lower case.
+- **Rate limiting**: `@nestjs/throttler` allows 60 requests per minute per IP globally and 10 per minute on `/oauth/*`. It protects your Zoho API credit quota, not just the server. Behind a reverse proxy, enable Express `trust proxy` so limits apply per client rather than per proxy.
+- **OAuth**: random, single-use, cookie-bound `state` (see above).
+
+## Testing
+
+```bash
+npm test          # unit + e2e smoke tests (no Zoho account needed)
+npm run test:cov  # with coverage
+```
+
+- Unit tests (`src/**/*.spec.ts`) cover: refresh timing and dedup under concurrency, the bounded 401 retry, Zoho error-envelope parsing, OAuth state single-use and cookie binding, lead dedup under concurrent creates, and the search-index lag.
+- E2E smoke tests (`test/app.e2e-spec.ts`) boot the real `AppModule` with a fake Zoho client and exercise every endpoint over HTTP: validation, error shapes, 201 vs 200 duplicate, 404, rate limiting, and a check that no response leaks the secret.
 
 ## Notes / limitations
 
-- `tokens.json` storage suits a single instance. For multiple instances, replace `TokenStoreService` with a database or secret-store backed implementation — nothing else needs to change.
-- The OAuth `state` values are kept in memory, so the login → callback round trip must hit the same instance.
+- **No authentication on `/leads`**: the assessment didn't ask for it. Anyone who can reach the server can read and create leads. Before real use, put it behind an API key or JWT guard, or a private network.
+- **Single instance**: `tokens.json`, the OAuth `state` store, and the dedup queue all live in one process. For several instances, swap `TokenStoreService` for a DB or secret store and move state and locks to Redis. No other code needs to change.
+- **One Zoho data center**: `ZOHO_ACCOUNTS_URL` and `ZOHO_API_DOMAIN` are fixed by config. A multi-tenant app would read the `accounts-server` callback parameter and the `api_domain` from the token response instead.
+- **Pagination**: `GET /leads` returns one page (`page`, `per_page` up to 200) plus `moreRecords`; the caller asks for the next page.
