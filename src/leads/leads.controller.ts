@@ -23,6 +23,12 @@ export class LeadsController {
     return this.leadsService.findAll(query);
   }
 
+  /** Label → API name mapping for Leads. Declared before :id on purpose. */
+  @Get('fields')
+  getFields() {
+    return this.leadsService.getFields();
+  }
+
   @Get(':id')
   async findOne(@Param() { id }: LeadIdParamDto) {
     return { data: await this.leadsService.findOne(id) };

@@ -24,7 +24,7 @@ describe('AuthService', () => {
       'https://accounts.zoho.com/oauth/v2/auth',
     );
     expect(Object.fromEntries(parsed.searchParams)).toMatchObject({
-      scope: 'ZohoCRM.modules.ALL',
+      scope: 'ZohoCRM.modules.ALL,ZohoCRM.settings.fields.READ',
       response_type: 'code',
       access_type: 'offline',
       prompt: 'consent',

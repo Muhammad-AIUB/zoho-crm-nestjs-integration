@@ -10,6 +10,8 @@ import { CreateLeadDto } from './dto/create-lead.dto';
 import { ListLeadsQueryDto } from './dto/list-leads-query.dto';
 import {
   Lead,
+  LeadField,
+  ZohoFieldMeta,
   ZohoLeadRecord,
   ZohoListResponse,
   ZohoWriteResult,
@@ -57,6 +59,31 @@ export class LeadsService {
         moreRecords,
         nextPage: moreRecords ? page + 1 : null,
       },
+    };
+  }
+
+  /**
+   * The CRM UI shows field *labels* ("Customer Type") but the API only
+   * accepts *API names* ("Customer_Type"). Labels can be renamed by admins
+   * at any time; API names can't, so integrations must use API names.
+   * This asks Zoho for the real mapping instead of guessing it.
+   */
+  async getFields(): Promise<{ module: string; fields: LeadField[] }> {
+    const res = await this.zoho.get<{ fields: ZohoFieldMeta[] }>(
+      '/settings/fields',
+      { module: 'Leads' },
+    );
+    return {
+      module: 'Leads',
+      fields: (res?.fields ?? []).map((f) => ({
+        label: f.field_label ?? f.display_label ?? f.api_name,
+        apiName: f.api_name,
+        dataType: f.data_type ?? null,
+        required: f.system_mandatory ?? false,
+        custom: f.custom_field ?? false,
+        readOnly: f.read_only ?? false,
+        maxLength: f.length ?? null,
+      })),
     };
   }
 

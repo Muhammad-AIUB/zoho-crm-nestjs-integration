@@ -26,6 +26,29 @@ export interface ZohoListResponse<T> {
   };
 }
 
+/** One entry from GET /settings/fields?module=Leads (fields we use). */
+export interface ZohoFieldMeta {
+  api_name: string;
+  field_label?: string;
+  display_label?: string;
+  data_type?: string;
+  system_mandatory?: boolean;
+  custom_field?: boolean;
+  read_only?: boolean;
+  length?: number;
+}
+
+/** Label → API name mapping we return from GET /leads/fields. */
+export interface LeadField {
+  label: string;
+  apiName: string;
+  dataType: string | null;
+  required: boolean;
+  custom: boolean;
+  readOnly: boolean;
+  maxLength: number | null;
+}
+
 export interface ZohoWriteResult {
   code: string;
   status: 'success' | 'error';

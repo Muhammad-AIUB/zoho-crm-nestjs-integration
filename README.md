@@ -107,7 +107,9 @@ This must be done once before calling any `/leads` endpoint.
 
 1. Start the server.
 2. Open **http://localhost:3000/oauth/login** in a browser.
-3. You are redirected to Zoho's consent screen (`scope=ZohoCRM.modules.ALL`, `access_type=offline`, `prompt=consent`). Log in and click **Accept**.
+3. You are redirected to Zoho's consent screen (`scope=ZohoCRM.modules.ALL,ZohoCRM.settings.fields.READ`, `access_type=offline`, `prompt=consent`). Log in and click **Accept**.
+   - `ZohoCRM.modules.ALL`: read, create and search records.
+   - `ZohoCRM.settings.fields.READ`: read field metadata for `GET /leads/fields`. A token granted without it gets `401 OAUTH_SCOPE_MISMATCH` on that endpoint; reconnecting fixes it.
 4. Zoho redirects back to `/oauth/callback?code=...&state=...`. The server checks the `state` (see below), exchanges the code for an access token and refresh token, and saves them to `tokens.json`. You'll see:
 
 ```json
@@ -158,6 +160,27 @@ curl "http://localhost:3000/leads?page=1&per_page=2"
 ```
 
 The paging values come straight from Zoho's `info` block (`page`, `per_page`, `count`, `more_records`). To walk every lead, keep requesting `nextPage` until it is `null`. Each page is one Zoho API call, so large syncs should use a bigger `per_page` (max 200).
+
+### `GET /leads/fields`
+
+Returns the mapping between what the CRM UI shows (**field label**) and what the API expects (**API name**), straight from Zoho's field metadata API (`GET /crm/v2/settings/fields?module=Leads`).
+
+```bash
+curl http://localhost:3000/leads/fields
+```
+
+```json
+{
+  "module": "Leads",
+  "fields": [
+    { "label": "Last Name", "apiName": "Last_Name", "dataType": "text", "required": true, "custom": false, "readOnly": false, "maxLength": 80 },
+    { "label": "Lead Source", "apiName": "Lead_Source", "dataType": "picklist", "required": false, "custom": false, "readOnly": false, "maxLength": 120 },
+    { "label": "Customer Type", "apiName": "Customer_Type", "dataType": "picklist", "required": false, "custom": true, "readOnly": false, "maxLength": null }
+  ]
+}
+```
+
+**Why it matters:** the API ignores labels. Sending `"Customer Type": "Retail"` does nothing; it has to be `"Customer_Type": "Retail"`. Admins can rename labels at any time, but API names stay fixed, so integrations should always use API names. This endpoint lets you look them up (including custom fields and which ones are required) instead of guessing. You can also find them in Zoho under *Setup → Developer Space → APIs → API Names*.
 
 ### `GET /leads/:id`
 

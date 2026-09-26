@@ -2,7 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes, timingSafeEqual } from 'crypto';
 
-const SCOPE = 'ZohoCRM.modules.ALL';
+// modules.ALL covers records (Leads CRUD + search). Field metadata lives
+// under settings and needs its own read-only scope.
+const SCOPE = 'ZohoCRM.modules.ALL,ZohoCRM.settings.fields.READ';
 export const STATE_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING_STATES = 1000;
 

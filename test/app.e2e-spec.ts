@@ -142,6 +142,37 @@ describe('App (with a fake Zoho)', () => {
           },
         };
       }
+      if (p === '/settings/fields') {
+        return {
+          fields: [
+            {
+              api_name: 'Last_Name',
+              field_label: 'Last Name',
+              data_type: 'text',
+              system_mandatory: true,
+              custom_field: false,
+              read_only: false,
+              length: 80,
+            },
+            {
+              api_name: 'Customer_Type',
+              field_label: 'Customer Type',
+              data_type: 'picklist',
+              system_mandatory: false,
+              custom_field: true,
+              read_only: false,
+            },
+          ],
+        };
+      }
+      if (p === '/Leads/401') {
+        throw new ZohoApiError(
+          401,
+          'OAUTH_SCOPE_MISMATCH',
+          'invalid oauth scope to access this URL',
+          'GET /crm/v2/Leads/401',
+        );
+      }
       if (p === '/Leads/400') {
         throw new ZohoApiError(
           400,
@@ -216,6 +247,32 @@ describe('App (with a fake Zoho)', () => {
       moreRecords: false,
       nextPage: null,
     });
+  });
+
+  it('GET /leads/fields maps UI labels to API names', async () => {
+    const res = record(await request(app.getHttpServer()).get('/leads/fields'));
+    expect(res.status).toBe(200);
+    expect(res.body.module).toBe('Leads');
+    expect(res.body.fields).toContainEqual({
+      label: 'Customer Type',
+      apiName: 'Customer_Type',
+      dataType: 'picklist',
+      required: false,
+      custom: true,
+      readOnly: false,
+      maxLength: null,
+    });
+    expect(res.body.fields[0]).toMatchObject({
+      apiName: 'Last_Name',
+      required: true,
+    });
+  });
+
+  it('explains OAUTH_SCOPE_MISMATCH as a missing permission, not an expired token', async () => {
+    const res = record(await request(app.getHttpServer()).get('/leads/401'));
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('OAUTH_SCOPE_MISMATCH');
+    expect(res.body.message).toContain('missing a required permission');
   });
 
   it('GET /leads/:id returns 404 for a missing record', async () => {
