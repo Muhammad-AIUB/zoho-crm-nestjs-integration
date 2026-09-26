@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# secrets and local state
+.env
+.env.local
+tokens.json
+
+# logs
+*.log
+npm-debug.log*
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# test coverage
+coverage/
