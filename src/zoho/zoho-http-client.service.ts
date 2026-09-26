@@ -1,8 +1,14 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios, { AxiosInstance, Method } from 'axios';
+import axios, { AxiosInstance, AxiosResponse, Method } from 'axios';
 import { TokenService } from '../auth/token.service';
 import { ZohoApiError } from './zoho-api.error';
+
+const MAX_TRANSIENT_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 300;
+const MAX_RETRY_DELAY_MS = 5_000;
+/** Connection-level errors where the request never left this machine. */
+const NEVER_SENT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
 
 interface ZohoErrorDetail {
   code?: string;
@@ -22,11 +28,13 @@ export interface ZohoRequestOptions {
 
 /**
  * Thin wrapper around the Zoho CRM REST API. Attaches the OAuth token,
- * retries once with a fresh token on 401, and turns every failure into a
- * ZohoApiError so callers never see raw Zoho/axios errors.
+ * retries temporary failures with backoff, retries once with a fresh token
+ * on 401, and turns every failure into a ZohoApiError so callers never see
+ * raw Zoho/axios errors.
  */
 @Injectable()
 export class ZohoHttpClient {
+  private readonly logger = new Logger(ZohoHttpClient.name);
   private readonly http: AxiosInstance;
 
   constructor(
@@ -61,13 +69,13 @@ export class ZohoHttpClient {
     const token = await this.tokenService.getAccessToken();
 
     try {
-      const res = await this.http.request<T>({
+      const res = await this.sendWithRetry<T>(
         method,
-        url: path,
-        params: options.params,
-        data: options.data,
-        headers: { Authorization: `Zoho-oauthtoken ${token}` },
-      });
+        path,
+        options,
+        token,
+        endpoint,
+      );
       return res.status === HttpStatus.NO_CONTENT ? null : res.data;
     } catch (err) {
       if (!axios.isAxiosError(err) || !err.response) {
@@ -103,6 +111,82 @@ export class ZohoHttpClient {
         error.details,
       );
     }
+  }
+
+  /**
+   * Retries temporary failures (Zoho 5xx, 429, timeouts, network drops) a
+   * couple of times with growing delays. 4xx errors are never retried: the
+   * same request would fail the same way. 401 is handled separately above.
+   */
+  private async sendWithRetry<T>(
+    method: Method,
+    path: string,
+    options: ZohoRequestOptions,
+    token: string,
+    endpoint: string,
+  ): Promise<AxiosResponse<T>> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.http.request<T>({
+          method,
+          url: path,
+          params: options.params,
+          data: options.data,
+          headers: { Authorization: `Zoho-oauthtoken ${token}` },
+        });
+      } catch (err) {
+        if (
+          attempt >= MAX_TRANSIENT_RETRIES ||
+          !this.isRetryable(err, method)
+        ) {
+          throw err;
+        }
+        const delay = this.retryDelay(err, attempt);
+        this.logger.warn(
+          `${endpoint} failed (${this.describe(err)}), retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${delay}ms`,
+        );
+        await this.sleep(delay);
+      }
+    }
+  }
+
+  private isRetryable(err: unknown, method: Method): boolean {
+    if (!axios.isAxiosError(err)) return false;
+    const status = err.response?.status;
+    const safeToRepeat = method.toUpperCase() === 'GET';
+
+    // 429: Zoho refused the request without running it, so any method is safe.
+    if (status === HttpStatus.TOO_MANY_REQUESTS) return true;
+    // 5xx or a timeout: a POST may already have created the record, and
+    // repeating it would make a duplicate. Only GETs are retried.
+    if (status !== undefined) return status >= 500 && safeToRepeat;
+    // No response. If the connection never opened, nothing reached Zoho.
+    if (NEVER_SENT_CODES.has(err.code ?? '')) return true;
+    return safeToRepeat;
+  }
+
+  private retryDelay(err: unknown, attempt: number): number {
+    const backoff = RETRY_BASE_DELAY_MS * 3 ** attempt; // 300ms, 900ms
+    const jitter = Math.floor(Math.random() * 100);
+    const retryAfter = axios.isAxiosError(err)
+      ? Number(err.response?.headers?.['retry-after']) * 1000
+      : NaN;
+    const wait = Number.isFinite(retryAfter)
+      ? Math.max(backoff, retryAfter)
+      : backoff;
+    return Math.min(wait + jitter, MAX_RETRY_DELAY_MS);
+  }
+
+  private describe(err: unknown): string {
+    if (!axios.isAxiosError(err)) return 'unknown error';
+    return err.response
+      ? `HTTP ${err.response.status}`
+      : (err.code ?? 'network error');
+  }
+
+  /** Separate method so tests can skip the real waiting. */
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private extractError(raw: unknown): ZohoErrorDetail {

@@ -19,6 +19,7 @@ describe('ZohoHttpClient', () => {
   let tokens: { getAccessToken: jest.Mock; refreshAccessToken: jest.Mock };
   let client: ZohoHttpClient;
   let request: jest.SpyInstance;
+  let sleep: jest.SpyInstance;
 
   beforeEach(() => {
     currentToken = 't1';
@@ -32,7 +33,12 @@ describe('ZohoHttpClient', () => {
     client = new ZohoHttpClient(config, tokens as unknown as TokenService);
     const http = (client as unknown as { http: AxiosInstance }).http;
     request = jest.spyOn(http, 'request');
+    sleep = jest
+      .spyOn(client as unknown as { sleep: () => Promise<void> }, 'sleep')
+      .mockResolvedValue(undefined);
   });
+
+  afterEach(() => jest.restoreAllMocks());
 
   it('returns null on 204 No Content', async () => {
     request.mockResolvedValueOnce({ status: 204, data: '' });
@@ -90,14 +96,74 @@ describe('ZohoHttpClient', () => {
     });
   });
 
-  it('maps Zoho 5xx to 502 and network failures to ZOHO_UNREACHABLE', async () => {
-    request.mockRejectedValueOnce(zohoError(503, 'Service Unavailable'));
-    await expect(client.get('/Leads')).rejects.toMatchObject({ status: 502 });
+  describe('transient-failure retries', () => {
+    const networkError = (code: string) =>
+      Object.assign(new Error(code), { isAxiosError: true, code });
+    const ok = { status: 200, data: { data: [] } };
 
-    request.mockRejectedValueOnce(new Error('ECONNRESET'));
-    await expect(client.get('/Leads')).rejects.toMatchObject({
-      status: 502,
-      zohoCode: 'ZOHO_UNREACHABLE',
+    it('retries a GET on 5xx and succeeds', async () => {
+      request
+        .mockRejectedValueOnce(zohoError(503, 'Service Unavailable'))
+        .mockRejectedValueOnce(zohoError(502, 'Bad Gateway'))
+        .mockResolvedValueOnce(ok);
+
+      await expect(client.get('/Leads')).resolves.toEqual({ data: [] });
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(sleep).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops after 2 retries and returns 502', async () => {
+      request.mockRejectedValue(zohoError(503, 'Service Unavailable'));
+      await expect(client.get('/Leads')).rejects.toMatchObject({
+        status: 502,
+      });
+      expect(request).toHaveBeenCalledTimes(3);
+    });
+
+    it('backs off longer on each retry', async () => {
+      request.mockRejectedValue(zohoError(503, ''));
+      await client.get('/Leads').catch(() => undefined);
+      const [first, second] = sleep.mock.calls.map(([ms]) => ms as number);
+      expect(first).toBeGreaterThanOrEqual(300);
+      expect(second).toBeGreaterThanOrEqual(900);
+    });
+
+    it('retries a GET on timeouts and network errors, then gives up', async () => {
+      request.mockRejectedValue(networkError('ECONNABORTED'));
+      await expect(client.get('/Leads')).rejects.toMatchObject({
+        status: 502,
+        zohoCode: 'ZOHO_UNREACHABLE',
+      });
+      expect(request).toHaveBeenCalledTimes(3);
+    });
+
+    it('never retries 4xx errors', async () => {
+      request.mockRejectedValue(zohoError(400, { code: 'INVALID_DATA' }));
+      await expect(client.get('/Leads')).rejects.toMatchObject({
+        status: 400,
+      });
+      expect(request).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retry a POST on 5xx or timeout (it may already have been created)', async () => {
+      request.mockRejectedValueOnce(zohoError(500, ''));
+      await expect(client.post('/Leads', {})).rejects.toMatchObject({
+        status: 502,
+      });
+      request.mockRejectedValueOnce(networkError('ECONNABORTED'));
+      await expect(client.post('/Leads', {})).rejects.toMatchObject({
+        zohoCode: 'ZOHO_UNREACHABLE',
+      });
+      expect(request).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries a POST when Zoho never ran it (429 or connection refused)', async () => {
+      request
+        .mockRejectedValueOnce(zohoError(429, { code: 'TOO_MANY_REQUESTS' }))
+        .mockRejectedValueOnce(networkError('ECONNREFUSED'))
+        .mockResolvedValueOnce(ok);
+      await expect(client.post('/Leads', {})).resolves.toEqual({ data: [] });
+      expect(request).toHaveBeenCalledTimes(3);
     });
   });
 });

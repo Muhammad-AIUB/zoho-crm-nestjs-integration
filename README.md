@@ -289,6 +289,20 @@ The logged error object is built by hand from safe fields, so the client secret,
 - `OAUTH_SCOPE_MISMATCH` is not retried, since a new token wouldn't fix it.
 - Nothing is hardcoded. If the refresh token itself is revoked, the API returns `401` asking you to run `/oauth/login` again.
 
+## Retry strategy
+
+`ZohoHttpClient` has two separate, bounded retry paths:
+
+| Failure | What happens | Max extra attempts |
+|---|---|---|
+| `401` (token expired or revoked) | Refresh the token, retry once | 1 |
+| `429`, `5xx`, timeout, network drop | Wait and retry: 300 ms, then 900 ms (plus jitter, honouring `Retry-After`, capped at 5 s) | 2 |
+| Other `4xx` (bad data, bad module, scope mismatch) | Not retried; the same request would fail the same way | 0 |
+
+**POSTs are more careful.** A POST that timed out or got a `5xx` may already have created the lead in Zoho, so repeating it could create a duplicate. POSTs are only retried when Zoho definitely did not process them: a `429`, or a connection that never opened (`ECONNREFUSED`, DNS failure). GETs are safe to repeat and retry on every temporary failure.
+
+Each retry logs a warning with the endpoint, the failure and the delay. Tokens are never logged.
+
 ## Duplicate prevention
 
 `POST /leads` must not create two leads with the same email. A plain "search, then create" has two gaps, and each has its own guard:
