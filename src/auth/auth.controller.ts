@@ -8,12 +8,15 @@ import {
   Res,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 import { AuthService, STATE_TTL_MS } from './auth.service';
 import { TokenService } from './token.service';
 
 const STATE_COOKIE = 'zoho_oauth_state';
 
+// The OAuth flow is a once-in-a-while action; keep it tight.
+@Throttle({ default: { ttl: 60_000, limit: 10 } })
 @Controller('oauth')
 export class AuthController {
   constructor(
